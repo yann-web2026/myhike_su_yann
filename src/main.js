@@ -1,8 +1,12 @@
 // Import the file that has the authentication helper function we want to use.
 // The function we want to use is called "onAuthReady" which returns the login state
 import { db } from "./firebaseConfig.js";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot, collection, getDocs, addDoc, serverTimestamp} from "firebase/firestore";
 import { onAuthReady } from "./authentication.js";
+import {getDoc, setDoc, arrayUnion, arrayRemove} from "firebase/firestore";
+
+let currentUser = null;
+let favourites = [];
 
 function showName() {
     // Pass a CALLBACK function to run when Firebase finishes checking login status
@@ -34,4 +38,163 @@ function showName() {
     });
 }
 
+// Helper function to add the sample hike documents.
+function addHikeData() {
+    const hikesRef = collection(db, "hikes");
+    console.log("Adding sample hike data...");
+    addDoc(hikesRef, {
+        code: "BBY01", name: "Burnaby Lake Park Trail", city: "Burnaby",
+        level: "easy", details: "A lovely place for a lunch walk.", length: 10,
+        hike_time: 60, lat: 49.2467097082573, lng: -122.9187029619698,
+        last_updated: serverTimestamp()
+    });
+    addDoc(hikesRef, {
+        code: "AM01", name: "Buntzen Lake Trail", city: "Anmore",
+        level: "moderate", details: "Close to town, and relaxing.", length: 10.5,
+        hike_time: 80, lat: 49.3399431028579, lng: -122.85908496766939,
+        last_updated: serverTimestamp()
+    });
+    addDoc(hikesRef, {
+        code: "NV01", name: "Mount Seymour Trail", city: "North Vancouver",
+        level: "hard", details: "Amazing ski slope views.", length: 8.2,
+        hike_time: 120, lat: 49.38847101455571, lng: -122.94092543551031,
+        last_updated: serverTimestamp()
+    });
+}
+
+// Seeds the "hikes" collection with initial data if it is empty
+async function seedHikes() {
+
+    // Get a reference to the "hikes" collection
+    const hikesRef = collection(db, "hikes");
+
+    // Retrieve all documents currently in the collection
+    const querySnapshot = await getDocs(hikesRef);
+
+    // If no documents exist, the collection is empty
+    if (querySnapshot.empty) {
+
+        console.log("Hikes collection is empty. Seeding data...");
+
+        // Call function to insert default hike documents
+        addHikeData();
+
+    } else {
+
+        // If documents already exist, do not reseed
+        console.log("Hikes collection already contains data. Skipping seed.");
+    }
+}
+
+// Call the seeding function when the main.html page loads.
+seedHikes();
+
 showName();
+
+async function displayCardsDynamically() {
+
+    let cardTemplate = document.getElementById("hikeCardTemplate");
+    const hikesCollectionRef = collection(db, "hikes");
+
+    try {
+        const querySnapshot = await getDocs(hikesCollectionRef);
+        querySnapshot.forEach(doc => {
+            let newcard = cardTemplate.content.cloneNode(true);
+            const hike = doc.data();
+            newcard.querySelector('.card-title').textContent = hike.name;
+            newcard.querySelector('.card-text').textContent = hike.details || `Located in ${hike.city}.`;
+            newcard.querySelector('.card-length').textContent = hike.length;
+            newcard.querySelector('.card-image').src = `./images/${hike.code}.jpg`;
+
+            // Add the link with the document ID
+            newcard.querySelector(".read-more").href = `eachHike.html?docID=${doc.id}`;
+
+            setupHeart(newcard, doc.id);
+            document.getElementById("hikes-go-here").appendChild(newcard);
+
+        });
+
+    } catch(error) {
+        console.error("Error getting documents: ", error);
+
+    }
+
+}
+
+// ------------------------------------------------------------
+// setupHeart(card, hikeID)
+// Gets ONE card's heart ready:
+//   - on page load: fills the heart if this hike is already a favourite
+//   - connects the click to toggleFavourite()
+// card   = the card we just built from the template
+// hikeID = this hike's document ID (doc.id)
+// ------------------------------------------------------------
+function setupHeart(card, hikeID) {
+
+    // [FRONT END] Find the heart icon inside this card
+    const heart = card.querySelector(".fav-btn");
+
+    // [FRONT END] Already a favourite? Fill the heart.
+    //             (favourites was read from Firestore in Step 2.3)
+    if (favourites.includes(hikeID)) {
+        heart.classList.replace("bi-heart", "bi-heart-fill");
+    }
+
+    // Connect it: "heart, when you are clicked, toggle this hike"
+    heart.addEventListener("click", function () {
+        toggleFavourite(heart, hikeID);
+    });
+}
+
+// ------------------------------------------------------------
+// toggleFavourite(heart, hikeID)
+// Runs on every click: adds or removes the hike from favourites
+// heart  = the heart icon that was clicked
+// hikeID = which hike it belongs to
+// ------------------------------------------------------------
+async function toggleFavourite(heart, hikeID) {
+
+    // [BACK END] The address of the logged-in user's document in Firestore
+    const userRef = doc(db, "users", currentUser.uid);
+
+    // [FRONT END] Is the heart filled right now?
+    if (heart.classList.contains("bi-heart-fill")) {
+
+        // Filled → REMOVE from favourites
+        // [BACK END] Remove this hike's ID from the user's favourites array
+        await setDoc(userRef, { favourites: arrayRemove(hikeID) }, { merge: true });
+        // [FRONT END] Show the empty heart
+        heart.classList.replace("bi-heart-fill", "bi-heart");
+
+    } else {
+
+        // Empty → ADD to favourites
+        // [BACK END] Add this hike's ID to the user's favourites array
+        await setDoc(userRef, { favourites: arrayUnion(hikeID) }, { merge: true });
+        // [FRONT END] Show the filled heart
+        heart.classList.replace("bi-heart", "bi-heart-fill");
+    }
+}
+
+// Runs once Firebase knows if someone is logged in
+onAuthReady(async function (user) {
+    if (!user) {
+        location.href = "index.html";                              // Not logged in → back to start
+    } else {
+        currentUser = user;                                        // 1. Remember who's logged in
+        const userDoc = await getDoc(doc(db, "users", user.uid));  // 2. Get their user doc
+
+        // 3. Load user's favourites, or use an empty array if none exist
+        favourites = userDoc.data()?.favourites || [];   // uses "optional chaining" (?.)
+
+
+        // Beginner version of the line above:
+        // if (userDoc.exists() && userDoc.data().favourites) {
+        //   favourites = userDoc.data().favourites;
+        // } else {
+        //   favourites = [];
+        // }
+
+        displayCardsDynamically();                                 // 4. Draw the cards
+    }
+});
